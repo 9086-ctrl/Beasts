@@ -34,6 +34,8 @@ public partial class Main : BaseSettingsPlugin<Settings>
     private readonly Dictionary<long, Entity> _trackedBeastEntities = new();
     private readonly Dictionary<long, TrackedBeastMapMarkerInfo> _trackedBeastOverlayCacheById = new();
     private readonly Dictionary<string, string> _trackedBeastNameCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _loggedUnknownCapturableMetadata = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _loggedTrackedBeastMetadata = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<TrackedBeastRenderInfo> _trackedBeastRenderBuffer = new();
     private readonly List<TrackedBeastMapMarkerInfo> _trackedBeastOverlayBuffer = new();
     private IReadOnlyList<TrackedBeastMapMarkerInfo> _trackedBeastOverlayThrottleBuffer = Array.Empty<TrackedBeastMapMarkerInfo>();
@@ -112,7 +114,6 @@ public partial class Main : BaseSettingsPlugin<Settings>
     private static bool IsOverlayHideInHideoutArea(AreaInstance area)
     {
         return area?.IsTown == true ||
-               area?.IsPeaceful == true ||
                IsHideoutLikeArea(area);
     }
 
@@ -282,12 +283,46 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
     public override void EntityAdded(Entity entity)
     {
-        if (!IsRareBeast(entity)) return;
-        if (TryGetTrackedBeastNameCached(entity.Metadata, out _))
+        if (!TryMatchTrackedBeast(entity, out _)) return;
+        _trackedBeastEntities[entity.Id] = entity;
+        UpdateTrackedBeastOverlayCache(entity, isLive: true);
+    }
+
+    private bool TryMatchTrackedBeast(Entity entity, out string beastName)
+    {
+        beastName = null;
+        if (entity == null) return false;
+        var metadata = entity.Metadata;
+        if (string.IsNullOrWhiteSpace(metadata)) return false;
+
+        if (TryGetTrackedBeastNameCached(metadata, out beastName))
         {
-            _trackedBeastEntities[entity.Id] = entity;
-            UpdateTrackedBeastOverlayCache(entity, isLive: true);
+            LogFirstSightingOfTrackedBeast(entity, beastName);
+            return true;
         }
+
+        if (IsRareBeast(entity) && _loggedUnknownCapturableMetadata.Add(metadata))
+        {
+            LogDebug($"Unrecognised rare capturable metadata: {metadata}");
+        }
+        else if ((entity.Rarity == MonsterRarity.Rare || entity.Rarity == MonsterRarity.Unique)
+                 && _loggedUnknownCapturableMetadata.Add(metadata))
+        {
+            var hasCapturableStat = IsCapturableMonsterStat is { } stat &&
+                                    entity.Stats?.ContainsKey(stat) == true;
+            LogDebug($"Unrecognised rare/unique monster: rarity={entity.Rarity} capturableStat={hasCapturableStat} metadata={metadata}");
+        }
+        return false;
+    }
+
+    private void LogFirstSightingOfTrackedBeast(Entity entity, string beastName)
+    {
+        if (Settings?.DebugLogging?.Value != true) return;
+        if (!_loggedTrackedBeastMetadata.Add(entity.Metadata)) return;
+
+        var hasCapturableStat = IsCapturableMonsterStat is { } stat &&
+                                entity.Stats?.ContainsKey(stat) == true;
+        LogDebug($"Tracked beast first sighted: {beastName} rarity={entity.Rarity} capturableStat={hasCapturableStat} metadata={entity.Metadata}");
     }
 
     public override void EntityRemoved(Entity entity)
@@ -363,21 +398,8 @@ public partial class Main : BaseSettingsPlugin<Settings>
         var trackedBeasts = new Dictionary<long, Entity>();
         foreach (var liveEntity in liveEntities)
         {
-            if (liveEntity?.IsValid != true)
-            {
-                continue;
-            }
-
-            if (!IsRareBeast(liveEntity))
-            {
-                continue;
-            }
-
-            if (!TryGetTrackedBeastNameCached(liveEntity.Metadata, out _))
-            {
-                continue;
-            }
-
+            if (liveEntity?.IsValid != true) continue;
+            if (!TryMatchTrackedBeast(liveEntity, out _)) continue;
             trackedBeasts[liveEntity.Id] = liveEntity;
         }
 
@@ -580,13 +602,30 @@ public partial class Main : BaseSettingsPlugin<Settings>
         return true;
     }
 
+    private DateTime _lastRenderHeartbeatUtc = DateTime.MinValue;
+
     public override void Render()
     {
         var now = DateTime.UtcNow;
 
-        if (_isCurrentAreaTrackable)
+        var currentArea = GameController?.Area?.CurrentArea;
+        var isAreaTrackable = IsRunnableMapArea(currentArea);
+        if (isAreaTrackable != _isCurrentAreaTrackable)
+        {
+            _isCurrentAreaTrackable = isAreaTrackable;
+        }
+        if (isAreaTrackable)
         {
             TrackBeastCaptureStates();
+        }
+
+        if (Settings?.DebugLogging?.Value == true &&
+            now - _lastRenderHeartbeatUtc >= TimeSpan.FromSeconds(15))
+        {
+            _lastRenderHeartbeatUtc = now;
+            var areOverlaysVisible = AreOverlaysVisible();
+            var isMirage = IsinMirage();
+            LogDebug($"Heartbeat: trackedCount={_trackedBeastEntities.Count} isAreaTrackable={isAreaTrackable} areOverlaysVisible={areOverlaysVisible} isMirage={isMirage} showLabels={Settings.MapRender.ShowBeastLabelsInWorld.Value} showWindow={Settings.MapRender.ShowTrackedBeastsWindow.Value} showEnabledOnly={Settings.MapRender.ShowEnabledOnly.Value} areaName='{currentArea?.Name}' isPeaceful={currentArea?.IsPeaceful}");
         }
 
         HandleBestiaryClipboardAutoCopy();
@@ -747,7 +786,7 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
         foreach (var tracked in AllRedBeasts)
         {
-            if (tracked.MetadataPatterns.Any(pattern => string.Equals(metadata, pattern, StringComparison.OrdinalIgnoreCase)))
+            if (tracked.MetadataPatterns.Any(pattern => MetadataMatchesPattern(metadata, pattern)))
             {
                 beastName = tracked.Name;
                 _trackedBeastNameCache[metadata] = beastName;
@@ -757,6 +796,33 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
         _trackedBeastNameCache[metadata] = MissingTrackedBeastName;
         return false;
+    }
+
+    private static bool MetadataMatchesPattern(string metadata, string pattern)
+    {
+        if (string.IsNullOrEmpty(metadata) || string.IsNullOrEmpty(pattern)) return false;
+
+        var basePath = pattern.EndsWith('_') ? pattern[..^1] : pattern;
+        if (basePath.Length == 0) return false;
+
+        if (metadata.Length < basePath.Length) return false;
+        if (!metadata.StartsWith(basePath, StringComparison.OrdinalIgnoreCase)) return false;
+
+        var suffix = metadata.AsSpan(basePath.Length);
+        if (suffix.IsEmpty) return true;
+
+        var hasUnderscore = suffix[0] == '_';
+        var i = hasUnderscore ? 1 : 0;
+
+        if (!hasUnderscore && char.IsDigit(basePath[^1])) return false;
+
+        if (i == suffix.Length) return hasUnderscore;
+
+        for (; i < suffix.Length; i++)
+        {
+            if (!char.IsDigit(suffix[i])) return false;
+        }
+        return true;
     }
 
     private static bool IsRareBeast(Entity entity)
