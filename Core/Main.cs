@@ -41,6 +41,8 @@ public partial class Main : BaseSettingsPlugin<Settings>
     private IReadOnlyList<TrackedBeastMapMarkerInfo> _trackedBeastOverlayThrottleBuffer = Array.Empty<TrackedBeastMapMarkerInfo>();
     private bool _wasBestiaryTabVisible;
     private bool _isBestiaryClipboardPasteRunning;
+    private DateTime _lastBestiaryClipboardCopyUtc = DateTime.MinValue;
+    private static readonly TimeSpan BestiaryClipboardCopyDebounce = TimeSpan.FromMilliseconds(500);
     private string _trackedBeastOverlayCacheAreaHash = string.Empty;
     private int _trackedBeastOverlayCacheAreaInstanceId = -1;
     private DateTime _trackedBeastOverlayThrottleLastRefreshUtc = DateTime.MinValue;
@@ -283,36 +285,38 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
     public override void EntityAdded(Entity entity)
     {
-        if (!TryMatchTrackedBeast(entity, out _)) return;
+        if (entity == null) return;
+        if (!IsRareBeast(entity))
+        {
+            LogUnrecognisedRareMonsterIfInteresting(entity);
+            return;
+        }
+        if (!TryGetTrackedBeastNameCached(entity.Metadata, out var beastName))
+        {
+            if (!string.IsNullOrWhiteSpace(entity.Metadata) &&
+                _loggedUnknownCapturableMetadata.Add(entity.Metadata))
+            {
+                LogDebug($"Unrecognised rare capturable metadata: {entity.Metadata}");
+            }
+            return;
+        }
+
         _trackedBeastEntities[entity.Id] = entity;
         UpdateTrackedBeastOverlayCache(entity, isLive: true);
+        LogFirstSightingOfTrackedBeast(entity, beastName);
     }
 
-    private bool TryMatchTrackedBeast(Entity entity, out string beastName)
+    private void LogUnrecognisedRareMonsterIfInteresting(Entity entity)
     {
-        beastName = null;
-        if (entity == null) return false;
+        if (Settings?.DebugLogging?.Value != true) return;
+        if (entity.Rarity != MonsterRarity.Rare && entity.Rarity != MonsterRarity.Unique) return;
         var metadata = entity.Metadata;
-        if (string.IsNullOrWhiteSpace(metadata)) return false;
+        if (string.IsNullOrWhiteSpace(metadata)) return;
+        if (!_loggedUnknownCapturableMetadata.Add(metadata)) return;
 
-        if (TryGetTrackedBeastNameCached(metadata, out beastName))
-        {
-            LogFirstSightingOfTrackedBeast(entity, beastName);
-            return true;
-        }
-
-        if (IsRareBeast(entity) && _loggedUnknownCapturableMetadata.Add(metadata))
-        {
-            LogDebug($"Unrecognised rare capturable metadata: {metadata}");
-        }
-        else if ((entity.Rarity == MonsterRarity.Rare || entity.Rarity == MonsterRarity.Unique)
-                 && _loggedUnknownCapturableMetadata.Add(metadata))
-        {
-            var hasCapturableStat = IsCapturableMonsterStat is { } stat &&
-                                    entity.Stats?.ContainsKey(stat) == true;
-            LogDebug($"Unrecognised rare/unique monster: rarity={entity.Rarity} capturableStat={hasCapturableStat} metadata={metadata}");
-        }
-        return false;
+        var hasCapturableStat = IsCapturableMonsterStat is { } stat &&
+                                entity.Stats?.ContainsKey(stat) == true;
+        LogDebug($"Unrecognised rare/unique monster: rarity={entity.Rarity} capturableStat={hasCapturableStat} metadata={metadata}");
     }
 
     private void LogFirstSightingOfTrackedBeast(Entity entity, string beastName)
@@ -340,36 +344,9 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
     private void TrackBeastCaptureStates()
     {
-        var liveTrackedBeasts = BuildLiveTrackedBeastEntityMap();
-        var staleTrackedIds = new List<long>();
-
         foreach (var (id, entity) in _trackedBeastEntities)
         {
-            if (liveTrackedBeasts.ContainsKey(id))
-            {
-                continue;
-            }
-
-            staleTrackedIds.Add(id);
-
-            if (_trackedBeastOverlayCacheById.TryGetValue(id, out var cachedOverlay) && cachedOverlay.IsLive)
-            {
-                _trackedBeastOverlayCacheById[id] = cachedOverlay with
-                {
-                    IsLive = false,
-                    LastUpdatedUtc = DateTime.UtcNow,
-                };
-            }
-        }
-
-        foreach (var staleTrackedId in staleTrackedIds)
-        {
-            _trackedBeastEntities.Remove(staleTrackedId);
-        }
-
-        foreach (var (id, entity) in liveTrackedBeasts)
-        {
-            _trackedBeastEntities[id] = entity;
+            if (entity?.IsValid != true) continue;
 
             UpdateTrackedBeastOverlayCache(entity, isLive: true);
 
@@ -379,31 +356,27 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
             MarkTrackedBeastCaptured(id, beastName, DateTime.UtcNow);
         }
+
+        var liveEntities = GameController?.EntityListWrapper?.Entities;
+        if (liveEntities == null) return;
+
+        foreach (var liveEntity in liveEntities)
+        {
+            if (liveEntity?.IsValid != true) continue;
+            if (_trackedBeastEntities.ContainsKey(liveEntity.Id)) continue;
+            if (!IsRareBeast(liveEntity)) continue;
+            if (!TryGetTrackedBeastNameCached(liveEntity.Metadata, out var beastName)) continue;
+
+            _trackedBeastEntities[liveEntity.Id] = liveEntity;
+            UpdateTrackedBeastOverlayCache(liveEntity, isLive: true);
+            LogFirstSightingOfTrackedBeast(liveEntity, beastName);
+        }
     }
 
     private void MarkTrackedBeastCaptured(long entityId, string beastName, DateTime now)
     {
         _trackedBeastOverlayCacheById.Remove(entityId);
         _capturedBeastIds.Add(entityId);
-    }
-
-    private Dictionary<long, Entity> BuildLiveTrackedBeastEntityMap()
-    {
-        var liveEntities = GameController?.EntityListWrapper?.Entities;
-        if (liveEntities == null)
-        {
-            return [];
-        }
-
-        var trackedBeasts = new Dictionary<long, Entity>();
-        foreach (var liveEntity in liveEntities)
-        {
-            if (liveEntity?.IsValid != true) continue;
-            if (!TryMatchTrackedBeast(liveEntity, out _)) continue;
-            trackedBeasts[liveEntity.Id] = liveEntity;
-        }
-
-        return trackedBeasts;
     }
 
     private IReadOnlyList<TrackedBeastRenderInfo> CollectTrackedBeastRenderInfo()
@@ -625,7 +598,15 @@ public partial class Main : BaseSettingsPlugin<Settings>
             _lastRenderHeartbeatUtc = now;
             var areOverlaysVisible = AreOverlaysVisible();
             var isMirage = IsinMirage();
-            LogDebug($"Heartbeat: trackedCount={_trackedBeastEntities.Count} isAreaTrackable={isAreaTrackable} areOverlaysVisible={areOverlaysVisible} isMirage={isMirage} showLabels={Settings.MapRender.ShowBeastLabelsInWorld.Value} showWindow={Settings.MapRender.ShowTrackedBeastsWindow.Value} showEnabledOnly={Settings.MapRender.ShowEnabledOnly.Value} areaName='{currentArea?.Name}' isPeaceful={currentArea?.IsPeaceful}");
+            var validTracked = 0;
+            var invalidTracked = 0;
+            foreach (var (_, ent) in _trackedBeastEntities)
+            {
+                if (ent?.IsValid == true) validTracked++;
+                else invalidTracked++;
+            }
+            var totalEntities = GameController?.EntityListWrapper?.Entities?.Count ?? -1;
+            LogDebug($"Heartbeat: tracked={_trackedBeastEntities.Count}(valid={validTracked},stale={invalidTracked}) entityListCount={totalEntities} isAreaTrackable={isAreaTrackable} areOverlaysVisible={areOverlaysVisible} isMirage={isMirage} showLabels={Settings.MapRender.ShowBeastLabelsInWorld.Value} areaName='{currentArea?.Name}' isPeaceful={currentArea?.IsPeaceful}");
         }
 
         HandleBestiaryClipboardAutoCopy();
@@ -847,10 +828,24 @@ public partial class Main : BaseSettingsPlugin<Settings>
         }
 
         var isVisible = IsBestiaryTabVisible();
-        if (isVisible && !_wasBestiaryTabVisible)
+        var now = DateTime.UtcNow;
+        var isRisingEdge = isVisible && !_wasBestiaryTabVisible;
+        var isPastDebounce = now - _lastBestiaryClipboardCopyUtc >= BestiaryClipboardCopyDebounce;
+
+        if (isRisingEdge && isPastDebounce)
         {
+            var useAutoRegex = Settings.BestiaryClipboard.UseAutoRegex.Value;
             var regex = GetConfiguredBestiaryRegex();
-            ImGui.SetClipboardText(regex);
+            ImGui.SetClipboardText(regex ?? string.Empty);
+            _lastBestiaryClipboardCopyUtc = now;
+
+            if (Settings?.DebugLogging?.Value == true)
+            {
+                var enabledCount = Settings.BeastPrices.EnabledBeasts.Count;
+                var fragmentCount = string.IsNullOrEmpty(regex) ? 0 : regex.Split('|').Length;
+                var mode = useAutoRegex ? "auto" : "manual";
+                LogDebug($"Bestiary clipboard copied. mode={mode} enabledBeasts={enabledCount} fragments={fragmentCount} regex='{regex}'");
+            }
 
             if (Settings.BestiaryClipboard.AutoPasteAfterCopy.Value &&
                 !_isBestiaryClipboardPasteRunning &&
@@ -868,17 +863,23 @@ public partial class Main : BaseSettingsPlugin<Settings>
     {
         try
         {
-            await Task.Delay(60);
+            if (!await WaitForBestiaryTabStableAsync(stableFrames: 3, checkIntervalMs: 40, timeoutMs: 800))
+                return;
+
+            await Task.Delay(200);
             if (!IsBestiaryTabVisible())
                 return;
 
             await TapKeyWithModifierAsync(Keys.ControlKey, Keys.F);
-            await Task.Delay(80);
+            await Task.Delay(220);
             if (!IsBestiaryTabVisible())
                 return;
 
             await TapKeyWithModifierAsync(Keys.ControlKey, Keys.V);
-            await Task.Delay(60);
+            await Task.Delay(180);
+            if (!IsBestiaryTabVisible())
+                return;
+
             await TapKeyAsync(Keys.Enter);
         }
         catch (Exception ex)
@@ -891,21 +892,41 @@ public partial class Main : BaseSettingsPlugin<Settings>
         }
     }
 
+    private async Task<bool> WaitForBestiaryTabStableAsync(int stableFrames, int checkIntervalMs, int timeoutMs)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        var consecutive = 0;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (IsBestiaryTabVisible())
+            {
+                consecutive++;
+                if (consecutive >= stableFrames) return true;
+            }
+            else
+            {
+                consecutive = 0;
+            }
+            await Task.Delay(checkIntervalMs);
+        }
+        return false;
+    }
+
     private static async Task TapKeyAsync(Keys key)
     {
         Input.KeyDown(key);
-        await Task.Delay(30);
+        await Task.Delay(50);
         Input.KeyUp(key);
     }
 
     private static async Task TapKeyWithModifierAsync(Keys modifier, Keys key)
     {
         Input.KeyDown(modifier);
-        await Task.Delay(20);
+        await Task.Delay(40);
         Input.KeyDown(key);
-        await Task.Delay(30);
+        await Task.Delay(50);
         Input.KeyUp(key);
-        await Task.Delay(20);
+        await Task.Delay(40);
         Input.KeyUp(modifier);
     }
 
@@ -919,10 +940,15 @@ public partial class Main : BaseSettingsPlugin<Settings>
     private string BuildAutoRegexFromEnabledBeasts()
     {
         var enabledBeasts = Settings.BeastPrices.EnabledBeasts;
-        if (enabledBeasts.Count == 0) return string.Empty;
-        return string.Join('|', AllRedBeasts
+        if (enabledBeasts == null || enabledBeasts.Count == 0) return string.Empty;
+
+        var fragments = AllRedBeasts
             .Where(b => enabledBeasts.Contains(b.Name) && !string.IsNullOrEmpty(b.RegexFragment))
-            .Select(b => b.RegexFragment));
+            .Select(b => b.RegexFragment)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        return string.Join('|', fragments);
     }
 
 }
