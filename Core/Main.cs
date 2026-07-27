@@ -35,7 +35,6 @@ public partial class Main : BaseSettingsPlugin<Settings>
     private readonly Dictionary<long, TrackedBeastMapMarkerInfo> _trackedBeastOverlayCacheById = new();
     private readonly Dictionary<string, string> _trackedBeastNameCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _loggedUnknownCapturableMetadata = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _loggedTrackedBeastMetadata = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<TrackedBeastRenderInfo> _trackedBeastRenderBuffer = new();
     private readonly List<TrackedBeastMapMarkerInfo> _trackedBeastOverlayBuffer = new();
     private IReadOnlyList<TrackedBeastMapMarkerInfo> _trackedBeastOverlayThrottleBuffer = Array.Empty<TrackedBeastMapMarkerInfo>();
@@ -286,12 +285,8 @@ public partial class Main : BaseSettingsPlugin<Settings>
     public override void EntityAdded(Entity entity)
     {
         if (entity == null) return;
-        if (!IsRareBeast(entity))
-        {
-            LogUnrecognisedRareMonsterIfInteresting(entity);
-            return;
-        }
-        if (!TryGetTrackedBeastNameCached(entity.Metadata, out var beastName))
+        if (!IsRareBeast(entity)) return;
+        if (!TryGetTrackedBeastNameCached(entity.Metadata, out _))
         {
             if (!string.IsNullOrWhiteSpace(entity.Metadata) &&
                 _loggedUnknownCapturableMetadata.Add(entity.Metadata))
@@ -303,30 +298,6 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
         _trackedBeastEntities[entity.Id] = entity;
         UpdateTrackedBeastOverlayCache(entity, isLive: true);
-        LogFirstSightingOfTrackedBeast(entity, beastName);
-    }
-
-    private void LogUnrecognisedRareMonsterIfInteresting(Entity entity)
-    {
-        if (Settings?.DebugLogging?.Value != true) return;
-        if (entity.Rarity != MonsterRarity.Rare && entity.Rarity != MonsterRarity.Unique) return;
-        var metadata = entity.Metadata;
-        if (string.IsNullOrWhiteSpace(metadata)) return;
-        if (!_loggedUnknownCapturableMetadata.Add(metadata)) return;
-
-        var hasCapturableStat = IsCapturableMonsterStat is { } stat &&
-                                entity.Stats?.ContainsKey(stat) == true;
-        LogDebug($"Unrecognised rare/unique monster: rarity={entity.Rarity} capturableStat={hasCapturableStat} metadata={metadata}");
-    }
-
-    private void LogFirstSightingOfTrackedBeast(Entity entity, string beastName)
-    {
-        if (Settings?.DebugLogging?.Value != true) return;
-        if (!_loggedTrackedBeastMetadata.Add(entity.Metadata)) return;
-
-        var hasCapturableStat = IsCapturableMonsterStat is { } stat &&
-                                entity.Stats?.ContainsKey(stat) == true;
-        LogDebug($"Tracked beast first sighted: {beastName} rarity={entity.Rarity} capturableStat={hasCapturableStat} metadata={entity.Metadata}");
     }
 
     public override void EntityRemoved(Entity entity)
@@ -365,11 +336,10 @@ public partial class Main : BaseSettingsPlugin<Settings>
             if (liveEntity?.IsValid != true) continue;
             if (_trackedBeastEntities.ContainsKey(liveEntity.Id)) continue;
             if (!IsRareBeast(liveEntity)) continue;
-            if (!TryGetTrackedBeastNameCached(liveEntity.Metadata, out var beastName)) continue;
+            if (!TryGetTrackedBeastNameCached(liveEntity.Metadata, out _)) continue;
 
             _trackedBeastEntities[liveEntity.Id] = liveEntity;
             UpdateTrackedBeastOverlayCache(liveEntity, isLive: true);
-            LogFirstSightingOfTrackedBeast(liveEntity, beastName);
         }
     }
 
@@ -575,8 +545,6 @@ public partial class Main : BaseSettingsPlugin<Settings>
         return true;
     }
 
-    private DateTime _lastRenderHeartbeatUtc = DateTime.MinValue;
-
     public override void Render()
     {
         var now = DateTime.UtcNow;
@@ -590,23 +558,6 @@ public partial class Main : BaseSettingsPlugin<Settings>
         if (isAreaTrackable)
         {
             TrackBeastCaptureStates();
-        }
-
-        if (Settings?.DebugLogging?.Value == true &&
-            now - _lastRenderHeartbeatUtc >= TimeSpan.FromSeconds(15))
-        {
-            _lastRenderHeartbeatUtc = now;
-            var areOverlaysVisible = AreOverlaysVisible();
-            var isMirage = IsinMirage();
-            var validTracked = 0;
-            var invalidTracked = 0;
-            foreach (var (_, ent) in _trackedBeastEntities)
-            {
-                if (ent?.IsValid == true) validTracked++;
-                else invalidTracked++;
-            }
-            var totalEntities = GameController?.EntityListWrapper?.Entities?.Count ?? -1;
-            LogDebug($"Heartbeat: tracked={_trackedBeastEntities.Count}(valid={validTracked},stale={invalidTracked}) entityListCount={totalEntities} isAreaTrackable={isAreaTrackable} areOverlaysVisible={areOverlaysVisible} isMirage={isMirage} showLabels={Settings.MapRender.ShowBeastLabelsInWorld.Value} areaName='{currentArea?.Name}' isPeaceful={currentArea?.IsPeaceful}");
         }
 
         HandleBestiaryClipboardAutoCopy();
@@ -834,18 +785,9 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
         if (isRisingEdge && isPastDebounce)
         {
-            var useAutoRegex = Settings.BestiaryClipboard.UseAutoRegex.Value;
             var regex = GetConfiguredBestiaryRegex();
             ImGui.SetClipboardText(regex ?? string.Empty);
             _lastBestiaryClipboardCopyUtc = now;
-
-            if (Settings?.DebugLogging?.Value == true)
-            {
-                var enabledCount = Settings.BeastPrices.EnabledBeasts.Count;
-                var fragmentCount = string.IsNullOrEmpty(regex) ? 0 : regex.Split('|').Length;
-                var mode = useAutoRegex ? "auto" : "manual";
-                LogDebug($"Bestiary clipboard copied. mode={mode} enabledBeasts={enabledCount} fragments={fragmentCount} regex='{regex}'");
-            }
 
             if (Settings.BestiaryClipboard.AutoPasteAfterCopy.Value &&
                 !_isBestiaryClipboardPasteRunning &&
