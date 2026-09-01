@@ -31,6 +31,7 @@ public partial class Main : BaseSettingsPlugin<Settings>
     private static readonly TrackedBeast[] AllRedBeasts = BeastData.AllRedBeasts;
 
     private readonly HashSet<long> _capturedBeastIds = new();
+    private readonly HashSet<long> _scannedBeastIds = new();
     private readonly Dictionary<long, Entity> _trackedBeastEntities = new();
     private readonly Dictionary<long, TrackedBeastMapMarkerInfo> _trackedBeastOverlayCacheById = new();
     private readonly Dictionary<string, string> _trackedBeastNameCache = new(StringComparer.OrdinalIgnoreCase);
@@ -223,6 +224,7 @@ public partial class Main : BaseSettingsPlugin<Settings>
         }
 
         _capturedBeastIds.Clear();
+        _scannedBeastIds.Clear();
         
         ScanAllEntitiesForBeasts();
     }
@@ -263,7 +265,13 @@ public partial class Main : BaseSettingsPlugin<Settings>
             if (!TryGetTrackedBeastNameCached(entity.Metadata, out var beastName)) continue;
 
             _trackedBeastEntities[entity.Id] = entity;
-            UpdateTrackedBeastOverlayCache(entity, isLive: true);
+            _scannedBeastIds.Add(entity.Id);
+            
+            // Add to overlay cache as live beast
+            if (TryBuildTrackedBeastOverlayInfo(entity, isLive: true, out var overlayInfo))
+            {
+                _trackedBeastOverlayCacheById[entity.Id] = overlayInfo;
+            }
             
             // Add scanned beasts to enabled list so they display in tracked window
             if (!enabledBeasts.Contains(beastName))
@@ -465,7 +473,8 @@ public partial class Main : BaseSettingsPlugin<Settings>
                 continue;
             }
 
-            if (!shouldIncludeCachedOverlays)
+            // Always include scanned beasts, or include cached overlays if in the same area scope
+            if (!_scannedBeastIds.Contains(overlayInfo.EntityId) && !shouldIncludeCachedOverlays)
             {
                 continue;
             }
