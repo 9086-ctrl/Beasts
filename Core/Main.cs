@@ -253,17 +253,28 @@ public partial class Main : BaseSettingsPlugin<Settings>
         var entities = GameController?.EntityListWrapper?.Entities;
         if (entities == null) return;
 
+        int scannedCount = 0;
+        var enabledBeasts = Settings.BeastPrices.EnabledBeasts;
+
         foreach (var entity in entities)
         {
             if (entity?.IsValid != true) continue;
             if (!IsRareBeast(entity)) continue;
-            if (!TryGetTrackedBeastNameCached(entity.Metadata, out _)) continue;
+            if (!TryGetTrackedBeastNameCached(entity.Metadata, out var beastName)) continue;
 
             _trackedBeastEntities[entity.Id] = entity;
             UpdateTrackedBeastOverlayCache(entity, isLive: true);
+            
+            // Add scanned beasts to enabled list so they display in tracked window
+            if (!enabledBeasts.Contains(beastName))
+            {
+                enabledBeasts.Add(beastName);
+            }
+
+            scannedCount++;
         }
 
-        LogDebug($"Map start scan found {_trackedBeastEntities.Count} beasts");
+        LogDebug($"Map start scan found {scannedCount} beasts");
     }
 
     private void EnsureTrackedBeastOverlayCacheScopeCurrentArea()
