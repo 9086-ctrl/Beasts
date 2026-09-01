@@ -223,6 +223,8 @@ public partial class Main : BaseSettingsPlugin<Settings>
         }
 
         _capturedBeastIds.Clear();
+        
+        ScanAllEntitiesForBeasts();
     }
 
     private void ClearTrackedBeastOverlayCache()
@@ -244,6 +246,24 @@ public partial class Main : BaseSettingsPlugin<Settings>
     {
         _trackedBeastOverlayCacheAreaHash = areaHash ?? string.Empty;
         _trackedBeastOverlayCacheAreaInstanceId = areaInstanceId;
+    }
+
+    private void ScanAllEntitiesForBeasts()
+    {
+        var entities = GameController?.EntityListWrapper?.Entities;
+        if (entities == null) return;
+
+        foreach (var entity in entities)
+        {
+            if (entity?.IsValid != true) continue;
+            if (!IsRareBeast(entity)) continue;
+            if (!TryGetTrackedBeastNameCached(entity.Metadata, out _)) continue;
+
+            _trackedBeastEntities[entity.Id] = entity;
+            UpdateTrackedBeastOverlayCache(entity, isLive: true);
+        }
+
+        LogDebug($"Map start scan found {_trackedBeastEntities.Count} beasts");
     }
 
     private void EnsureTrackedBeastOverlayCacheScopeCurrentArea()
