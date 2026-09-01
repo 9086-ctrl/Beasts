@@ -252,13 +252,14 @@ public partial class Main : BaseSettingsPlugin<Settings>
 
     private void ScanAllEntitiesForBeasts()
     {
-        var entities = GameController?.EntityListWrapper?.Entities;
-        if (entities == null) return;
+        // Try to get all entities from the area - not just visible ones
+        var allEntities = GetAllEntitiesInArea();
+        if (allEntities == null || allEntities.Count == 0) return;
 
         int scannedCount = 0;
         var enabledBeasts = Settings.BeastPrices.EnabledBeasts;
 
-        foreach (var entity in entities)
+        foreach (var entity in allEntities)
         {
             if (entity?.IsValid != true) continue;
             if (!IsRareBeast(entity)) continue;
@@ -283,6 +284,33 @@ public partial class Main : BaseSettingsPlugin<Settings>
         }
 
         LogDebug($"Map start scan found {scannedCount} beasts");
+    }
+
+    private List<Entity> GetAllEntitiesInArea()
+    {
+        var result = new List<Entity>();
+        
+        // First try to get entities from the EntityListWrapper (viewport)
+        var viewportEntities = GameController?.EntityListWrapper?.Entities;
+        if (viewportEntities != null)
+        {
+            result.AddRange(viewportEntities);
+        }
+
+        // Also try to get all entities from the game state if available
+        var allEntities = GameController?.Game?.IngameState?.Data?.Entities;
+        if (allEntities != null)
+        {
+            foreach (var entity in allEntities)
+            {
+                if (entity != null && !result.Contains(entity))
+                {
+                    result.Add(entity);
+                }
+            }
+        }
+
+        return result.Count > 0 ? result : null;
     }
 
     private void EnsureTrackedBeastOverlayCacheScopeCurrentArea()
